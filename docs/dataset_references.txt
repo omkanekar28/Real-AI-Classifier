@@ -1,0 +1,2 @@
+Images: https://www.kaggle.com/datasets/cashbowman/ai-generated-images-vs-real-images?select=AiArtData
+Text: https://www.kaggle.com/datasets/shanegerami/ai-vs-human-text
