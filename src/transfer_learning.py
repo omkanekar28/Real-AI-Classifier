@@ -1,27 +1,30 @@
+import time
 import os
 import pyfiglet
 from typing import List, Tuple, Dict, Any, Union
-import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from transformers import DistilBertTokenizer, DistilBertModel
 import torch
 from torch import nn
-from sklearn.metrics import accuracy_score
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-DATASET_PATH = "/home/om/code/Real-AI-Classifier/data/AI_Human_Refined.csv"
-NUMBER_OF_EPOCHS = 3
-LEARNING_RATE = 1e-3
-BATCH_SIZE = 4
-MODEL_SAVE_PATH = "."
+DATASET_PATH = "/content/AI_Human_Refined.csv"
+NUMBER_OF_EPOCHS = 8
+LEARNING_RATE = 5e-4
+BATCH_SIZE = 256
+MODEL_SAVE_PATH = "/content/"
 
 
 class DistilbertModelHandler:
     """
-    Handles all the operations related to the distilbert-base-uncased model 
+    Handles all the operations related to the distilbert-base-uncased model
     (and tokenizer) being used for Real/AI text classification.
     """
-    
+
     def __init__(self) -> None:
         """
         Initialises the distilbert-base-uncased model and tokenizer.
@@ -49,17 +52,17 @@ class DistilbertModelHandler:
             truncation=True,
             return_tensors='pt'
         ).to(DEVICE)
-    
+
 
 class DistilbertWithClassifier(nn.Module):
     """
-    distilbert-base-uncased model with a binary-classification head. To be trained 
+    distilbert-base-uncased model with a binary-classification head. To be trained
     for classifying text as real or AI-generated.
     """
 
     def __init__(self, distilbert_handler: DistilbertModelHandler, num_labels=2) -> None:
         """
-        Loads the distilbert-base-uncased model and adds a binary 
+        Loads the distilbert-base-uncased model and adds a binary
         classification head (a linear layer).
         """
         super(DistilbertWithClassifier, self).__init__()
@@ -73,7 +76,7 @@ class DistilbertWithClassifier(nn.Module):
         cls_embedding = outputs[:, 0, :]    # ONLY TAKING CLS TOKEN
         probability = self.classifier(cls_embedding)
         return probability
-    
+
     def freeze_distilbert_weights(self) -> None:
         """Freezes entire distilbert architecture."""
         print("Freezing the distilbert-base-uncased model layers")
@@ -99,14 +102,14 @@ class DatasetHandler:
         Returns text for the corresponding dataset row index.
         """
         return self.dataset.iloc[index, 1]
-    
+
     def split_dataframe(self, dataframe: pd.DataFrame, split_value: float) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Splits the dataframe in two sub-sets based on split_index.
         """
         real_dataframe = dataframe[dataframe['generated'] == 0]
         ai_dataframe = dataframe[dataframe['generated'] == 1]
-        
+
         real_split_index = int(len(real_dataframe) * split_value)
         ai_split_index = int(len(ai_dataframe) * split_value)
 
@@ -120,7 +123,7 @@ class DatasetHandler:
         second_split = pd.concat([real_dataframe_second, ai_dataframe_second])
 
         return first_split, second_split
-    
+
     def train_test_validation_split(self, train_split_value: float) -> None:
         """
         Prepares the 3 splits.
@@ -148,9 +151,7 @@ class ClassifierTrainer:
         else:
             print(f"Classifier will use CPU")
         self.classifier.to(DEVICE)
-        self.number_of_epochs = NUMBER_OF_EPOCHS
-        self.learning_rate = LEARNING_RATE
-                        
+
         # OPTIMIZER
         self.optimizer = torch.optim.Adam(self.classifier.parameters(), lr=LEARNING_RATE)
         print(f"\nOptimizer loaded:\n{self.optimizer}\n")
@@ -163,12 +164,14 @@ class ClassifierTrainer:
         """
         Trains the classifier over the dataset.
         """
+        print("Starting Training...")
+        start_time = time.time()
         self.training_loss = []
         self.validation_loss = []
 
         for epoch in range(NUMBER_OF_EPOCHS):
             self.classifier.train()
-            
+
             for start_idx in range(0, len(self.dataset.X_train), BATCH_SIZE):
                 end_idx = start_idx + BATCH_SIZE
                 batch_text = self.dataset.X_train[start_idx:end_idx]
@@ -176,32 +179,68 @@ class ClassifierTrainer:
                 labels = torch.tensor(batch_labels, device=DEVICE, dtype=torch.long)
 
                 self.optimizer.zero_grad()
-                outputs = self.classifier(batch_text)
-                
-                training_loss = self.loss_fn(outputs, labels)
-                self.training_loss.append(training_loss)
+                logits = self.classifier(batch_text)
+                training_loss = self.loss_fn(logits, labels)
                 training_loss.backward()
                 self.optimizer.step()
+            self.training_loss.append(training_loss.item())
 
             with torch.no_grad():
-                y_pred = self.classifier(self.dataset.X_val)
-                labels = torch.tensor(self.dataset.y_val, device=DEVICE, dtype=torch.long)
-                val_loss = self.loss_fn(y_pred, labels)
-                self.validation_loss.append(val_loss)
-                print(f"Epoch {epoch+1} | Training Loss: {training_loss:.4f} | Validation Loss {val_loss:.4f}")
+                val_loss_total = 0.0
+                for start_idx in range(0, len(self.dataset.X_val), BATCH_SIZE):
+                    end_idx = start_idx + BATCH_SIZE
+                    batch_text = self.dataset.X_val[start_idx:end_idx]
+                    batch_labels = self.dataset.y_val[start_idx:end_idx]
+                    labels = torch.tensor(batch_labels, device=DEVICE, dtype=torch.long)
 
-        print("Training Finished Successfully!")
-    
-    def compute_accuracy(self) -> None:
+                    logits = self.classifier(batch_text)
+                    val_loss = self.loss_fn(logits, labels)
+                    val_loss_total += val_loss.item()
+
+                val_loss_avg = val_loss_total / (len(self.dataset.X_val) // BATCH_SIZE)
+                self.validation_loss.append(val_loss_avg)
+
+                print(f"Epoch {epoch+1} | Training Loss: {training_loss.item():.4f} | Validation Loss {val_loss_avg:.4f}")
+
+        print(f"Training Finished Successfully in {int((time.time() - start_time) / 60)} minutes!")
+
+    def plot_progress(self) -> None:
+        """
+        Plots the training and validation losses per epoch.
+        """
+        epochs = [x for x in range(1, NUMBER_OF_EPOCHS+1)]
+        plt.plot(epochs, self.training_loss)
+        plt.plot(epochs, self.validation_loss)
+        plt.xlabel("Epochs")
+        plt.ylabel("Loss")
+        plt.title("Training/Validation Loss")
+        plt.show()
+
+    def compute_accuracy(self) -> float:
         """
         Uses the test dataset to compute the final model accuracy.
         """
         with torch.no_grad():
-            y_pred = self.classifier(self.dataset.X_test)
-            y_pred = torch.argmax(y_pred, dim=1).cpu().numpy()
-            labels = np.array(self.dataset.y_test)
-            accuracy = accuracy_score(y_true=labels, y_pred=y_pred)
-            print(f"\nThe final model accuracy is {accuracy:.2f}%\n")
+            correct_predictions = 0
+            total_predictions = 0
+            test_loss_total = 0.0
+            for start_idx in range(0, len(self.dataset.X_test), BATCH_SIZE):
+                end_idx = start_idx + BATCH_SIZE
+                batch_text = self.dataset.X_test[start_idx:end_idx]
+                batch_labels = self.dataset.y_test[start_idx:end_idx]
+                labels = torch.tensor(batch_labels, device=DEVICE, dtype=torch.long)
+
+                logits = self.classifier(batch_text)
+                test_loss = self.loss_fn(logits, labels)
+                test_loss_total += test_loss.item()
+
+                _, predicted_labels = torch.max(logits, dim=1)
+
+                correct_predictions += (predicted_labels == labels).sum().item()
+                total_predictions += labels.size(0)
+
+            accuracy = correct_predictions / total_predictions
+            return accuracy
 
     def save_model(self) -> None:
         """
@@ -219,6 +258,8 @@ if __name__ == '__main__':
     dataset_handler = DatasetHandler(DATASET_PATH)
     classifier.freeze_distilbert_weights()
     trainer = ClassifierTrainer(classifier, dataset_handler)
+    print(f"Model accuracy before training: {(trainer.compute_accuracy() * 100):.2f}%\n")
     trainer.train_classifier()
-    trainer.compute_accuracy()
     trainer.save_model()
+    trainer.plot_progress()
+    print(f"Model accuracy after training: {(trainer.compute_accuracy() * 100):.2f}%\n")
